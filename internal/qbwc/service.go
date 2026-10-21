@@ -78,7 +78,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // (chapter 10). result is either a string or a []string.
 func (s *Service) dispatch(method string, p map[string]string) any {
 	switch method {
-	case "serverVersion":
+	// The guide's reference calls it getServerVersion; community
+	// implementations use serverVersion. Answer both.
+	case "serverVersion", "getServerVersion":
 		return "quickbooks-bridge 0.1"
 	case "clientVersion":
 		return "" // any QBWC version is fine
