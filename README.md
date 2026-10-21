@@ -36,3 +36,7 @@ Tested against the protocol in Intuit's QBWC Programmer's Guide (version 2.0) wi
 ```bash
 go test ./...
 ```
+
+## Licence
+
+Apache 2.0. Built by [Reflekt Lab](https://reflektlab.ai) while writing [QuickBooks API integration](https://reflektlab.ai/blog/quickbooks-api-integration/).
