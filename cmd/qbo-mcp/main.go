@@ -8,7 +8,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rflkt/quickbooks-bridge/internal/qbo"
@@ -44,6 +46,13 @@ func main() {
 	addr := flag.String("addr", "localhost:8090", "listen address")
 	flag.Parse()
 
+	// QBO_MCP_TOKEN, when set, is required as a bearer token on every request.
+	// Without it the server refuses to listen beyond localhost.
+	token := os.Getenv("QBO_MCP_TOKEN")
+	if token == "" && !isLoopback(*addr) {
+		log.Fatalf("refusing to listen on %s without QBO_MCP_TOKEN; set a token or use a localhost address", *addr)
+	}
+
 	cfg, err := qbo.ConfigFromEnv()
 	if err != nil {
 		log.Fatal(err)
@@ -53,11 +62,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "quickbooks-bridge", Version: "v0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "quickbooks-bridge", Version: "v0.2.0"},
+		&mcp.ServerOptions{Instructions: instructions})
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}
+	addReadme(server)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_customers",
+		Title:       "Search customers",
 		Description: "Find active QuickBooks customers by part of their display name. Returns Id, name, open balance and email.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a nameArgs) (*mcp.CallToolResult, customersOut, error) {
@@ -67,6 +79,7 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_items",
+		Title:       "Search products and services",
 		Description: "Find active products and services by part of their name. Returns Id, name, type and list price.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a nameArgs) (*mcp.CallToolResult, itemsOut, error) {
@@ -76,6 +89,7 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_open_invoices",
+		Title:       "List open invoices",
 		Description: "List invoices with a balance still due, oldest due date first, optionally for one customer.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a openInvoicesArgs) (*mcp.CallToolResult, invoicesOut, error) {
@@ -84,7 +98,8 @@ func main() {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "draft_invoice",
+		Name:  "draft_invoice",
+		Title: "Draft an invoice from an order",
 		Description: "Turn an order (customer name, items and quantities as written) into a draft invoice: " +
 			"names are matched to QuickBooks records, prices come from the item list unless the order states one, " +
 			"and anything ambiguous or missing is listed under problems instead of guessed. Writes nothing. " +
@@ -96,10 +111,13 @@ func main() {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "create_invoice",
+		Name:  "create_invoice",
+		Title: "Create an approved invoice in QuickBooks",
 		Description: "Create the invoice in QuickBooks from the same order sent to draft_invoice, once the person has approved the draft. " +
 			"approved_total must equal the draft total they saw; if anything changed in between, nothing is created.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false},
+		// Not destructive (it adds an invoice, never changes one) and not
+		// idempotent (calling it twice creates two), so clients ask first.
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(false), IdempotentHint: false, OpenWorldHint: boolPtr(true)},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a createArgs) (*mcp.CallToolResult, createdOut, error) {
 		d, err := qbo.BuildDraft(ctx, client, a.DraftRequest)
 		if err != nil {
@@ -116,12 +134,33 @@ func main() {
 			return nil, createdOut{}, err
 		}
 		created, err := client.CreateInvoice(ctx, inv)
-		return nil, createdOut{Invoice: created}, err
+		if err != nil {
+			return nil, createdOut{}, err
+		}
+		// Every write leaves a line saying what was approved and what was created.
+		log.Printf("create_invoice: invoice %s for customer %s, total %.2f (approved %.2f)",
+			created.DocNumber, d.Customer.Value, d.Total, a.ApprovedTotal)
+		return nil, createdOut{Invoice: created}, nil
 	})
 
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	http.Handle("/mcp", handler)
+	http.Handle("/mcp", requireBearer(token, handler))
 	log.Printf("QuickBooks MCP server on http://%s/mcp (%s)", *addr, cfg.BaseURL())
 	log.Fatal(http.ListenAndServe(*addr, nil))
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// isLoopback reports whether addr listens on localhost only.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
