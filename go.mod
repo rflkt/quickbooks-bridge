@@ -1,6 +1,6 @@
 module github.com/rflkt/quickbooks-bridge
 
-go 1.27.3
+go 1.27
 
 require github.com/modelcontextprotocol/go-sdk v1.6.1
 
